@@ -42,11 +42,15 @@ struct state {
     int rx_ok;
     int ooo; /* out of order */
     int dropped;
+
     union {
 	struct sockaddr_ll *sll;
 	struct sockaddr *saddr; 
 	struct sockaddr_in *sin;
-    } u;
+    } ;
+    uint32_t tx_ip;
+    uint32_t sender_ip;
+    unsigned short port;
     unsigned char mac[6];
     unsigned char me[6];
 };
@@ -55,10 +59,12 @@ int verbose=0;
 #define printv(fmt, args...) do { if(verbose) {printf(fmt, ##args); } } while(0)
 #define printvv(fmt, args...) do { if(verbose > 1) {printf(fmt, ##args); } } while(0)
 
-const char eth_broadcast[]={0xff,0xff,0xff,0xff,0xff,0xff};
+static const unsigned char eth_broadcast[]={0xff,0xff,0xff,0xff,0xff,0xff};
 static pthread_barrier_t start_barrier;
 
-static void * fill_ethernet(char *p, const char *him, const char *me, uint16_t proto) {
+static void * fill_ethernet(unsigned char *p, const unsigned char *him, const unsigned char *me, 
+			    uint16_t proto) 
+{
     int i, j=0; 
     for(i=0; i < 6; i++) {
 	p[j++] = him[i];
@@ -74,19 +80,14 @@ static void * fill_ethernet(char *p, const char *him, const char *me, uint16_t p
 }
 
 static unsigned short csum(unsigned short *buf, int nwords)
-
-{       //
-
+{
         unsigned long sum;
         for(sum=0; nwords>0; nwords--)
                 sum += *buf++;
         sum = (sum >> 16) + (sum &0xffff);
         sum += (sum >> 16);
         return (unsigned short)(~sum);
-
 }
-struct state rx_state;
-struct state tx_state;
 
 #define on_error(x,y) do {if((x) < 0) { perror (y); exit(-1); }} while(0)
 
@@ -97,8 +98,8 @@ void do_arp(struct state *tx, uint32_t src, uint32_t dst) {
     struct arphdr *arp;
     int size;
 
-    char buf[128];
-    char *p;
+    unsigned char buf[128];
+    unsigned char *p;
     /* I want to send real RAW packets */
     p = fill_ethernet(buf, eth_broadcast, tx->me, (0x806));
     arp = (struct arphdr*)p;
@@ -107,7 +108,7 @@ void do_arp(struct state *tx, uint32_t src, uint32_t dst) {
     arp->ar_hln = 6;
     arp->ar_pln = 4;
     arp->ar_op = htons(ARPOP_REQUEST); 
-    p = (char*)++arp;
+    p = (unsigned char*)++arp;
     i=0;
     for(i=0; i < 6; i++) {
 	p[i]=tx->me[i]; 
@@ -119,7 +120,7 @@ void do_arp(struct state *tx, uint32_t src, uint32_t dst) {
     memcpy(&p[i], &dst, 4);
     i+=4;
     size = &p[i]-&buf[0];
-    n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->u.sll, sizeof(*(tx->u.sll)));
+    n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
     on_error(n, "sendto");
 }
 
@@ -132,8 +133,8 @@ int recv_arp(struct state *rx, uint32_t src, uint32_t dst) {
     uint32_t a,b;
     int n;
 
-    sll = sizeof(*rx->u.sll);
-    n = recvfrom(rx->intf, buf, sizeof(buf), 0, (struct sockaddr*)rx->u.sll, &sll); 
+    sll = sizeof(*rx->sll);
+    n = recvfrom(rx->intf, buf, sizeof(buf), 0, (struct sockaddr*)rx->sll, &sll); 
     on_error(n,"recvfrom");
     eth = (struct ethhdr*)buf; 
 
@@ -184,15 +185,15 @@ static void * fill_udp(void *p, uint16_t src, uint16_t dst, uint16_t size) {
 
 void do_tx_udp(struct state *tx, uint32_t src, uint32_t dst, uint16_t sprt, uint16_t dprt, uint16_t size) {
     void *p;
-    char *buf;
+    unsigned char *buf;
     int n;
 
-    buf = malloc(size);
+    buf = (unsigned char*)malloc(size);
 
     p = fill_ethernet(buf, tx->mac, tx->me, 0x0800);
     p = fill_ip(p, src, dst, IPPROTO_UDP, (size-SIZEOF_ETHERNET));
     p = fill_udp(p, sprt, dprt, size-SIZEOF_ETHERNET-SIZEOF_IP);
-    n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->u.sll, sizeof(*(tx->u.sll)));
+    n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
     on_error(n, "sendto");
     
 }
@@ -209,7 +210,7 @@ void send_pkt(struct state *tx, void *p, int size) {
     int restart;
     do { 
 	restart = 0;
-	n = sendto(tx->intf, p, size, 0, (struct sockaddr*)tx->u.sll, sizeof(*(tx->u.sll)));
+	n = sendto(tx->intf, p, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
 	if(n == -1 && errno == ENOBUFS) { 
 	    usleep(10);
 	    restart = 1;
@@ -220,12 +221,23 @@ void send_pkt(struct state *tx, void *p, int size) {
     on_error(n, "sendto");
 }
 
+void * rx_thread(void *arg) {
+    char buf[65535];
+    struct state *rx = arg;
+
+    while(1) {
+	printf("try\n");
+	recv(rx->intf, buf, sizeof(buf), 0); 
+	printf("got packet\n");
+    }
+}
+
 void * tx_thread(void *arg) {
     struct state *tx = (struct state*)arg;
     char *p = malloc(128);
     char *p2;
     int i;
-    p2 = prepare_tx_udp(tx, p, IP(192,168,1,21), IP(172,16,1,20), 1234, 1234, 128);
+    p2 = prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, 64);
     (void)p2;
     pthread_barrier_wait(&start_barrier);
     for(i = 0; i < 4; i++) {	
@@ -253,12 +265,15 @@ int main(int argc, char **argv) {
     pthread_t *threads;
     cpu_set_t cpu;
     char *intf0=NULL;
-    char optstr[]="o:r:R:t:T:i:S:v";
+    char optstr[]="p:o:r:R:t:T:i:S:v";
     int o;
     int ifindex;
     struct ifreq ifr;
     uint32_t rx_ip=0, tx_ip=0, my_ip=0;
     int die = 0;
+    pthread_attr_t attr;
+    int cpus = 4;
+    unsigned short port=0;
 
     while((o=getopt(argc, argv, optstr)) != -1) {
 	switch(o) {
@@ -290,13 +305,15 @@ int main(int argc, char **argv) {
 	case 'v':
 	    verbose++;
 	    break;
+	case 'p':
+	    port = atoi(optarg);
+	    break;
 	case 'h':
 	default:
 	    usage();
 	    exit(0);
 	}
     }
-	
     if(rx_threads <= 0) {
 	printf("Error: rx_threads must be > 0\n");
 	die = 1;
@@ -327,6 +344,11 @@ int main(int argc, char **argv) {
 	die = 1;
     }
 
+    if(port == 0) {
+	printf("Error: port == 0\n");
+	die = 1;
+    }
+
     if(die)
 	exit(die);
 
@@ -336,12 +358,15 @@ int main(int argc, char **argv) {
 	   "\ttx_interface: %s\n"
 	   "\trx_ip: %d.%d.%d.%d\n"
 	   "\ttx_ip: %d.%d.%d.%d\n"
-	   "\tmy_ip: %d.%d.%d.%d\n",
+	   "\tmy_ip: %d.%d.%d.%d\n"
+	   "\tport: %d\n"
+	   ,
 
 	   rx_threads, tx_threads, intf0,
 	   htonl(rx_ip)>>24, (htonl(rx_ip)>>16)&0xFF, (htonl(rx_ip)>>8)&0xFF, htonl(rx_ip)&0xFF,
 	   htonl(tx_ip)>>24, (htonl(tx_ip)>>16)&0xFF, (htonl(tx_ip)>>8)&0xFF, htonl(tx_ip)&0xFF,
-	   htonl(my_ip)>>24, (htonl(my_ip)>>16)&0xFF, (htonl(my_ip)>>8)&0xFF, htonl(my_ip)&0xFF
+	   htonl(my_ip)>>24, (htonl(my_ip)>>16)&0xFF, (htonl(my_ip)>>8)&0xFF, htonl(my_ip)&0xFF,
+	   port
 	   );
     i = socket(AF_INET, SOCK_STREAM, 0);
     memset(&ifr, 0, sizeof(ifr));
@@ -356,18 +381,25 @@ int main(int argc, char **argv) {
 
     /* I want to send real RAW packets */
     tx.intf = socket(PF_PACKET, SOCK_RAW, htons(0x806));
-    tx.u.sll = &tx_sll;
+    tx.sll = &tx_sll;
     on_error(tx.intf, "socket");
 
-    tx.u.sll->sll_family = PF_PACKET;
-    tx.u.sll->sll_protocol = htons(0x806);
-    tx.u.sll->sll_ifindex = ifindex;
-    tx.u.sll->sll_hatype = 0;
-    tx.u.sll->sll_pkttype = PACKET_OUTGOING;
-    tx.u.sll->sll_halen = ETH_ALEN;
+    tx.sll->sll_family = PF_PACKET;
+    tx.sll->sll_protocol = htons(0x806);
+    tx.sll->sll_ifindex = ifindex;
+    tx.sll->sll_hatype = 0;
+    tx.sll->sll_pkttype = PACKET_OUTGOING;
+    tx.sll->sll_halen = ETH_ALEN;
+    tx.port = (port);
+    tx.tx_ip = rx_ip;
+    tx.sender_ip = my_ip;
 
     rx.intf = socket(PF_INET, SOCK_DGRAM, 0);
-    rx.u.sin = &rx_sin;
+    rx.sin = &rx_sin;
+    rx.sin->sin_family = AF_INET;
+    rx.sin->sin_addr.s_addr = htonl(rx_ip); 
+    rx.sin->sin_port = htons(port);
+    i = bind(rx.intf, rx.saddr, sizeof(*rx.saddr)); 
     on_error(rx.intf, "socket");
 
 
@@ -387,19 +419,26 @@ int main(int argc, char **argv) {
 	       htonl(my_ip)>>24, (htonl(my_ip)>>16)&0xFF, 
 	       (htonl(my_ip)>>8)&0xFF, htonl(my_ip)&0xFF);
 	do_arp(&tx, my_ip, tx_ip); 
-	tx.u.sll->sll_pkttype = PACKET_HOST;
+	tx.sll->sll_pkttype = PACKET_HOST;
 	i = recv_arp(&tx, my_ip, tx_ip); 
-	tx.u.sll->sll_pkttype = PACKET_OUTGOING;
+	tx.sll->sll_pkttype = PACKET_OUTGOING;
     } while(!i);
-    printvv("got arp response from %.2x:%.2x:%.2x:%.2x:%.2x\n",
+    printvv("got arp response from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
 	    tx.mac[0], tx.mac[1], tx.mac[2], tx.mac[3], tx.mac[4], tx.mac[5]);
+
+
     for(i=0; i < rx_threads; i++) {
-	
+	CPU_ZERO(&cpu);
+	CPU_SET(i%cpus, &cpu);
+	pthread_attr_init(&attr);
+	pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
+
+	printf("Spawning thread %d on processor %d\n", 
+	       i, i%cpus);
+	pthread_create(&threads[0], &attr, rx_thread, &rx);
     }
     
     for (i=0; i < tx_threads; i++) { 
-	pthread_attr_t attr;
-	int cpus = 4;
 	CPU_ZERO(&cpu);
 	CPU_SET(i%cpus, &cpu);
 	pthread_attr_init(&attr);

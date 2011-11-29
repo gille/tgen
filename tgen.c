@@ -246,6 +246,7 @@ static void * rx_thread(void *arg) {
     FD_ZERO(&r);
     FD_SET(rx->intf, &r);
 
+    /* atomic */
     while(1) {
 	t.tv_sec = 1;
 	t.tv_usec = 0; 
@@ -253,6 +254,8 @@ static void * rx_thread(void *arg) {
 	if(n == 1) {
 	    recv(rx->intf, buf, sizeof(buf), 0); 
 	    packets++;
+	    if(unlikely(packets == rx->packets))
+		return (void*)packets;
 	} else {
 	    /* No traffic received for 1s */
 	    return (void*)packets;
@@ -309,7 +312,18 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     rx_bw /= usec;
     tx_bw /= usec;
 
+
     printv("tx bandwidth: %lldMb/s rx bandwidth %lldMb/s rx packets lost: %d\n", tx_bw, rx_bw, tx_packets*tx_threads-rx_packets);
+    tx_bw = tx_packets;
+    tx_bw *= tx_threads;
+    tx_bw *= 1000000;
+    tx_bw /= usec;
+
+    rx_bw = rx_packets;
+    rx_bw *= 1000000;
+    rx_bw /= usec;
+
+    printv("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
 }
 
 int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads);
@@ -474,6 +488,16 @@ int main(int argc, char **argv) {
     o = ioctl(i, SIOCGIFINDEX, &ifr);
     on_error(o, "SIOCGIFINDEX");
     ifindex = ifr.ifr_ifindex;
+
+    o = ioctl(i, SIOCGIFMTU, &ifr);
+    on_error(o, "SIOCGIFMTU");
+    if((size-SIZEOF_ETHERNET) > ifr.ifr_mtu) { 
+	printf("Error: size > MTU (%d > %d)\n", 
+	       size, ifr.ifr_mtu);
+	exit(1);
+    }
+
+
     close(i);
 
     /* I want to send real RAW packets */
@@ -515,15 +539,25 @@ int main(int argc, char **argv) {
 	i = recv_arp(&tx, my_ip, tx_ip); 
 	tx.sll->sll_pkttype = PACKET_OUTGOING;
     } while(!i);
-    printvv("got arp response from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+    printv("got arp response from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
 	    tx.mac[0], tx.mac[1], tx.mac[2], tx.mac[3], tx.mac[4], tx.mac[5]);
    
 
     if(binary_search) {
 	current_sleep = 64; 
+	tx.sleep_period = 0; 
+	if(do_udp_bmark(&tx, &rx, tx_threads, rx_threads) == 0) {
+	    /* No delay necessary */
+	    return 0; 
+	}
+
 	do { 
 	    tx.sleep_period = current_sleep;
 	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads); 
+	    if(n == tx.packets*tx_threads) {
+		printf("No packets received.. aborting\n");
+		exit(0);
+	    }
 	    current_sleep *= 2; /* *= 4? */
 	} while (n != 0); 
 	delta = current_sleep/2;
@@ -603,15 +637,16 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
 	on_error_zero(o, "pthread_join");
 	printvv("tx thread %d died\n", i);
     }
-    gettimeofday(&t1, NULL);    
+
     for(i=0; i < rx_threads; i++) {
 	unsigned int *p;
 	o = pthread_join(rx_pthreads[i], (void**)&p);
 	on_error_zero(o, "pthread_join");
 	printvv("rx thread %d died\n", i);
 	rx_packets += (unsigned int)p;
-    }
+    }    
 
+    gettimeofday(&t1, NULL);
     free(tx_pthreads);
     free(rx_pthreads);
     print_time(&t0, &t1, tx->packets, rx_packets, tx->size, tx_threads);

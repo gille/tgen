@@ -41,7 +41,9 @@
 #define IP(a,b,c,d) ((a)<<24)|((b)<<16)|((c)<<8)|(d)
 #endif
 
-#define on_error(x,y) do {if(unlikely((x) < 0)) { perror (y); exit(-1); }} while(0)
+#define on_error(x,y) do {if(unlikely((x) < 0)) { fprintf(stderr, "Error in %s:%d [%s %s]\n", __FILE__, __LINE__, y, strerror(errno)); exit(-1); }} while(0)
+#define on_error_zero(x,y) do {if(unlikely((x) != 0)) { fprintf(stderr, "Error in %s:%d [%s %s]\n", __FILE__, __LINE__, y, strerror(errno)); exit(-1); }} while(0)
+#define on_error_ptr(x,y) do {if(unlikely((x) == NULL)) { fprintf(stderr, "Error in %s:%d [%s %s]\n", __FILE__, __LINE__, y, strerror(errno)); exit(-1); }} while(0)
 
 #define SIZEOF_ETHERNET (14)
 #define SIZEOF_IP       (20)
@@ -190,20 +192,21 @@ static void * fill_udp(void *p, uint16_t src, uint16_t dst, uint16_t size) {
     return ++udp;
 }
 
+#if 0
 static void do_tx_udp(struct state *tx, uint32_t src, uint32_t dst, uint16_t sprt, uint16_t dprt, uint16_t size) {
     void *p;
     unsigned char *buf;
     int n;
 
     buf = (unsigned char*)malloc(size);
-
+    on_error_ptr(buf, "malloc");
     p = fill_ethernet(buf, tx->mac, tx->me, 0x0800);
     p = fill_ip(p, src, dst, IPPROTO_UDP, (size-SIZEOF_ETHERNET));
     p = fill_udp(p, sprt, dprt, size-SIZEOF_ETHERNET-SIZEOF_IP);
     n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
     on_error(n, "sendto");
-    
 }
+#endif
 
 static void *prepare_tx_udp(struct state *tx, void *p, uint32_t src_ip, uint32_t dst_ip, uint16_t sprt, uint16_t dprt, uint16_t size) {
     p = fill_ethernet(p, tx->mac, tx->me, 0x0800);
@@ -233,10 +236,11 @@ static void * rx_thread(void *arg) {
     struct state *rx = arg;
 
     while(1) {
-	printvvv("try\n");
+	printvv("try\n");
 	recv(rx->intf, buf, sizeof(buf), 0); 
-	printvvv("got packet\n");
+	printv("got packet\n");
     }
+    return NULL;
 }
 
 static void * tx_thread(void *arg) {
@@ -244,6 +248,7 @@ static void * tx_thread(void *arg) {
     char *p = malloc(tx->size);
     char *p2;
     int i;
+    on_error_ptr(p, "malloc");
     p2 = prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
     (void)p2;
     pthread_barrier_wait(&start_barrier);
@@ -258,6 +263,7 @@ static void * tx_thread(void *arg) {
 }
 
 static void usage(void) {
+    printf("usage: \n");
 }
 
 static void print_time(struct timeval *t0, struct timeval *t1, int size, int packets) {
@@ -271,7 +277,7 @@ static void print_time(struct timeval *t0, struct timeval *t1, int size, int pac
     }
     t.tv_sec = t1->tv_sec - t0->tv_sec;
     t.tv_usec = t1->tv_usec - t0->tv_usec;
-    printv("time elapsed: %d:%d\n", t.tv_sec, t.tv_usec/1000);
+    printv("time elapsed: %d:%d\n", (int)t.tv_sec, (int)t.tv_usec/1000);
     usec = 1000000*t.tv_sec;
     usec += t.tv_usec;
     bw = size;
@@ -290,24 +296,25 @@ int main(int argc, char **argv) {
     struct state rx; 
     struct sockaddr_ll tx_sll;
     struct sockaddr_in rx_sin;
-    char me[]={0x00, 0x50, 0x43, 0x00, 0xd7, 0xAA};
-    int i;
-    int tx_threads=4, rx_threads = 0;
+    const char optstr[]="p:o:r:R:t:T:i:S:vn:s:";
+
     pthread_t *threads;
     cpu_set_t cpu;
-    char *intf0=NULL;
-    char optstr[]="p:o:r:R:t:T:i:S:vn:s:";
-    int o;
-    int ifindex;
+    int i, o, ifindex;
+
     struct ifreq ifr;
-    uint32_t rx_ip=0, tx_ip=0, my_ip=0;
-    int die = 0;
     pthread_attr_t attr;
-    int cpus = 8;
-    unsigned short port=0;
-    int packets = 0;
-    int size = 0;
     struct timeval t0, t1;
+
+
+    int tx_threads=0, rx_threads = 0, packets = 0, size = 0, die = 0;
+    uint32_t rx_ip=0, tx_ip=0, my_ip=0;
+    char *intf0=NULL;
+    unsigned short port=0;
+
+    int cpus = 8;
+
+
     while((o=getopt(argc, argv, optstr)) != -1) {
 	switch(o) {
 	case 'i':
@@ -354,6 +361,7 @@ int main(int argc, char **argv) {
 	    exit(0);
 	}
     }
+
     if(rx_threads <= 0) {
 	printf("Error: rx_threads must be > 0\n");
 	die = 1;
@@ -413,7 +421,6 @@ int main(int argc, char **argv) {
 	   "\tpackets %d\n"
 	   "\tsize: %db\n\n"
 	   ,
-
 	   rx_threads, tx_threads, intf0,
 	   htonl(rx_ip)>>24, (htonl(rx_ip)>>16)&0xFF, (htonl(rx_ip)>>8)&0xFF, htonl(rx_ip)&0xFF,
 	   htonl(tx_ip)>>24, (htonl(tx_ip)>>16)&0xFF, (htonl(tx_ip)>>8)&0xFF, htonl(tx_ip)&0xFF,
@@ -428,52 +435,51 @@ int main(int argc, char **argv) {
 	    "\t--------------------\n"
 	    "\t%db\n\n",
 	    size-SIZEOF_ETHERNET-SIZEOF_IP-SIZEOF_UDP, size);
+
     i = socket(AF_INET, SOCK_STREAM, 0);
+    on_error(i, "socket");
+
     memset(&ifr, 0, sizeof(ifr));
     strcpy(ifr.ifr_name, intf0); 
     o = ioctl(i, SIOCGIFHWADDR, &ifr);
     on_error(o, "SIOCGIFHWADDR"); 
+    memcpy(tx.me, ifr.ifr_hwaddr.sa_data, 6);
 
     o = ioctl(i, SIOCGIFINDEX, &ifr);
+    on_error(o, "SIOCGIFINDEX");
     ifindex = ifr.ifr_ifindex;
-    on_error(o, "SIOCGIFINDEX");    
     close(i);
 
     /* I want to send real RAW packets */
     tx.intf = socket(PF_PACKET, SOCK_RAW, htons(0x806));
-    tx.sll = &tx_sll;
     on_error(tx.intf, "socket");
 
+    tx.sll = &tx_sll;
     tx.sll->sll_family = PF_PACKET;
     tx.sll->sll_protocol = htons(0x806);
     tx.sll->sll_ifindex = ifindex;
     tx.sll->sll_hatype = 0;
     tx.sll->sll_pkttype = PACKET_OUTGOING;
     tx.sll->sll_halen = ETH_ALEN;
-    tx.port = (port);
+    tx.port = port;
     tx.tx_ip = rx_ip;
     tx.sender_ip = my_ip;
     tx.packets = packets;
     tx.size = size;
 
     rx.intf = socket(PF_INET, SOCK_DGRAM, 0);
+    on_error(rx.intf, "socket");
     rx.sin = &rx_sin;
     rx.sin->sin_family = AF_INET;
-    rx.sin->sin_addr.s_addr = htonl(rx_ip); 
+    rx.sin->sin_addr.s_addr = (rx_ip); 
     rx.sin->sin_port = htons(port);
     i = bind(rx.intf, rx.saddr, sizeof(*rx.saddr)); 
-    on_error(rx.intf, "socket");
-
-
-    for(i=0; i < 6; i++) {
-	tx.me[i]=me[i];
-    }
-    /* step one arp */
-    i = 0;
+    on_error_zero(i, "bind"); 
 
     threads = malloc(sizeof(pthread_t)*tx_threads);
-    pthread_barrier_init(&start_barrier, NULL, tx_threads+1);
-
+    on_error_ptr(threads, "malloc");
+    i = pthread_barrier_init(&start_barrier, NULL, tx_threads+1);
+    on_error_zero(i, "pthread_barrier_init");
     do {
 	printv("arp for %d.%d.%d.%d from %d.%d.%d.%d\n",
 	       htonl(tx_ip)>>24, (htonl(tx_ip)>>16)&0xFF, 
@@ -492,32 +498,40 @@ int main(int argc, char **argv) {
     for(i=0; i < rx_threads; i++) {
 	CPU_ZERO(&cpu);
 	CPU_SET((i+cpus/2)%cpus, &cpu);
-	pthread_attr_init(&attr);
-	pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
-
+	o = pthread_attr_init(&attr);
+	on_error_zero(o, "pthread_attr_init");
+	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
+	on_error_zero(o, "pthread_attr_setaffinity_np");
 	printv("Spawning rx thread %d on processor %d\n", 
 	       i, (i+cpus/2)%cpus);
-	pthread_create(&threads[0], &attr, rx_thread, &rx);
+	o = pthread_create(&threads[0], &attr, rx_thread, &rx);
+	on_error_zero(o, "pthread_create");
     }
     
+
     for (i=0; i < tx_threads; i++) { 
 	CPU_ZERO(&cpu);
 	CPU_SET(i%cpus, &cpu);
-	pthread_attr_init(&attr);
+	o = pthread_attr_init(&attr);
+	on_error_zero(o, "pthread_attr_init");
 	tx_th = malloc(sizeof(*tx_th));
+	on_error_ptr(tx_th, "malloc");
 	memcpy(tx_th, &tx, sizeof(*tx_th));
 	tx_th->intf = socket(PF_PACKET, SOCK_RAW, htons(0x806));
-	pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
-
+	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
+	on_error_zero(o, "pthread_attr_setaffinity_np");
 	printv("Spawning tx thread %d on processor %d\n", 
 	       i, i%cpus);
-	pthread_create(&threads[i], &attr, tx_thread, tx_th);
+	o = pthread_create(&threads[i], &attr, tx_thread, tx_th);
+	on_error_zero(o, "pthread_create");
     }
     gettimeofday(&t0, NULL);
-    pthread_barrier_wait(&start_barrier);
-    for(i=0; i < 4; i++) {
-	pthread_join(threads[i], NULL);
-	printv("thread %d died\n", i);
+    o = pthread_barrier_wait(&start_barrier);
+    on_error_zero(o, "pthread_barrier_wait");
+    for(i=0; i < tx_threads; i++) {
+	o = pthread_join(threads[i], NULL);
+	on_error_zero(o, "pthread_join");
+	printvv("thread %d died\n", i);
 
     }
     gettimeofday(&t1, NULL);

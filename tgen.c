@@ -57,7 +57,7 @@ struct state {
     int intf;
     int next_expected;
     int rx_ok;
-    int ooo; /* out of order */
+    int oop; /* out of order */
     int dropped;
     int packets; 
     int size;
@@ -80,8 +80,7 @@ static int verbose=0;
 static int id = 0;
 static const unsigned char eth_broadcast[]={0xff,0xff,0xff,0xff,0xff,0xff};
 static pthread_barrier_t start_barrier;
-static pthread_mutex_t tx_mutex;
-static pthread_cond_t cond; 
+static pthread_spinlock_t tx_spin, rx_spin; 
 
 static void * fill_ethernet(unsigned char *p, const unsigned char *him, const unsigned char *me, 
 			    uint16_t proto) 
@@ -207,6 +206,7 @@ static void do_tx_udp(struct state *tx, uint32_t src, uint32_t dst, uint16_t spr
 
     buf = (unsigned char*)malloc(size);
     on_error_ptr(buf, "malloc");
+    memset(buf, 0xFF, size);
     p = fill_ethernet(buf, tx->mac, tx->me, 0x0800);
     p = fill_ip(p, src, dst, IPPROTO_UDP, (size-SIZEOF_ETHERNET));
     p = fill_udp(p, sprt, dprt, size-SIZEOF_ETHERNET-SIZEOF_IP);
@@ -249,7 +249,8 @@ static void * rx_thread(void *arg)
     fd_set r; 
     struct timeval t;
     int n;
-    
+    unsigned char *p;
+    int i;
     packets = 0;
     FD_ZERO(&r);
     FD_SET(rx->intf, &r);
@@ -258,31 +259,58 @@ static void * rx_thread(void *arg)
     while(1) {
 	t.tv_sec = 1;
 	t.tv_usec = 0; 
+	/* Take spin lock */
+	pthread_spin_lock(&rx_spin);
+	if(unlikely(0 == rx->packets)) {
+	    pthread_spin_unlock(&rx_spin); 
+	    return (void*)packets;
+	}
 	n = select(rx->intf+1, &r, 0, 0, &t); 
 	if(n == 1) {
+	    /* What happens if we race? */
 	    recv(rx->intf, buf, sizeof(buf), 0); 
 	    packets++;
-	    if(unlikely(packets == rx->packets))
+	    rx->packets--;
+	    i = *(unsigned int*)buf;
+	    if(i != rx->next_expected) {
+		rx->oop++; 
+	    } else {
+		rx->next_expected++;
+	    }
+	    
+	    pthread_spin_unlock(&rx_spin);
+	    if(unlikely(0 == rx->packets)) {
 		return (void*)packets;
+	    }
 	} else {
+	    pthread_spin_unlock(&rx_spin);
 	    /* No traffic received for 1s */
 	    return (void*)packets;
 	}
     }
-    return NULL;
 }
 
 static void * tx_thread(void *arg) 
 {
     struct state *tx = (struct state*)arg;
     char *p = malloc(tx->size);
+    uint32_t *p2;
     int i;
     on_error_ptr(p, "malloc");
-    prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
+    memset(p, 0xFF, tx->size);
+    p2 = (uint32_t*)prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
 
     pthread_barrier_wait(&start_barrier);
-    for(i=0; i < tx->packets;i++) {	    
+    while(tx->packets != 0) {
+	pthread_spin_lock(&tx_spin);
+	if(tx->packets == 0) {
+	    pthread_spin_unlock(&tx_spin);
+	    return NULL;
+	}
+	tx->packets--;
+	*p2 = tx->next_expected++;
 	send_pkt(tx, p, tx->size);
+	pthread_spin_unlock(&tx_spin);
 	usleep(tx->sleep_period);
     }
 
@@ -301,7 +329,7 @@ static void usage(void)
 	   "\t-T IP address to send traffic via\n"
 	   "\t-S IP address to source traffic from\n"
 	   "\t-p port number to use\n"
-	   "\t-n number of packets to send per thread\n"
+	   "\t-n number of packets to send\n"
 	   "\t-s size of packet incl. all headers\n"
 	   "\t-v verbosity -vvv for max\n"
 	   "\t-u time to sleep between each packet\n"
@@ -350,6 +378,7 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     } else { 
 	printv("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
     }
+    printvv("%d packets sent, %d packets received\n", tx_packets, rx_packets);
 }
 
 int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print) {
@@ -358,17 +387,20 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
     int cpus = 8; 
     pthread_attr_t attr;
     struct timeval t0, t1;
-    struct state *tx_th;
     pthread_t *tx_pthreads;
     pthread_t *rx_pthreads;
     cpu_set_t cpu;
     int rx_packets = 0; 
+    int tx_packets = tx->packets;
 
     tx_pthreads = malloc(sizeof(pthread_t)*tx_threads);
     on_error_ptr(tx_pthreads, "malloc");
 
     rx_pthreads = malloc(sizeof(pthread_t)*rx_threads);
     on_error_ptr(rx_pthreads, "malloc");
+
+    pthread_spin_init(&tx_spin, 0); 
+    pthread_spin_init(&rx_spin, 0); 
 
     i = pthread_barrier_init(&start_barrier, NULL, tx_threads+1);
     on_error_zero(i, "pthread_barrier_init");
@@ -391,18 +423,16 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
 	CPU_SET(i%cpus, &cpu);
 	o = pthread_attr_init(&attr);
 	on_error_zero(o, "pthread_attr_init");
-	tx_th = malloc(sizeof(*tx_th));
-	on_error_ptr(tx_th, "malloc");
-	memcpy(tx_th, tx, sizeof(*tx_th));
 	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
 	on_error_zero(o, "pthread_attr_setaffinity_np");
 	printvvv("Spawning tx thread %d on processor %d\n", 
 		 i, i%cpus);
-	o = pthread_create(&tx_pthreads[i], &attr, tx_thread, tx_th);
+	o = pthread_create(&tx_pthreads[i], &attr, tx_thread, tx);
 	on_error_zero(o, "pthread_create");
     }
-    usleep(50000);
+    usleep(500000);
     o = pthread_barrier_wait(&start_barrier);
+
     gettimeofday(&t0, NULL);
     for(i=0; i < tx_threads; i++) {
 	o = pthread_join(tx_pthreads[i], NULL);
@@ -416,14 +446,20 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
 	on_error_zero(o, "pthread_join");
 	printvv("rx thread %d died\n", i);
 	rx_packets += (unsigned int)p;
-    }    
+    }
+    printv("rx out of order: %d\n", rx->oop);
 
     gettimeofday(&t1, NULL);
     free(tx_pthreads);
     free(rx_pthreads);
-    print_time(&t0, &t1, tx_threads*tx->packets, rx_packets, tx->size, print);
 
-    return tx->packets*tx_threads-rx_packets;
+    if(rx_packets < tx_packets) {
+	t1.tv_sec-=rx_threads;
+    }   
+
+    print_time(&t0, &t1, tx_packets, rx_packets, tx->size, print);
+
+    return tx_packets-rx_packets;
 }
 
 int main(int argc, char **argv) 
@@ -441,6 +477,9 @@ int main(int argc, char **argv)
     char *intf0 = NULL;
     unsigned short port = 0;
     int current_sleep, delta; 
+
+    memset(&tx, 0, sizeof(tx));
+    memset(&rx, 0, sizeof(rx));
 
     while((o=getopt(argc, argv, optstr)) != -1) {
 	switch(o) {
@@ -625,7 +664,6 @@ int main(int argc, char **argv)
 
     rx.intf = socket(PF_INET, SOCK_DGRAM, 0);
     on_error(rx.intf, "socket");
-    rx.packets = (tx_threads * packets)/rx_threads;
     rx.sin = &rx_sin;
     rx.sin->sin_family = AF_INET;
     rx.sin->sin_addr.s_addr = (rx_ip); 
@@ -648,19 +686,30 @@ int main(int argc, char **argv)
 	    tx.mac[0], tx.mac[1], tx.mac[2], tx.mac[3], tx.mac[4], tx.mac[5]);
    
     if(binary_search) {
-	current_sleep = 64; 
 	tx.sleep_period = 0; 
-	if(do_udp_bmark(&tx, &rx, tx_threads, rx_threads, PRINT_NO_LOSS) == 0) {
+	rx.packets = packets;
+	tx.packets = packets;
+	tx.next_expected = 0;
+	rx.oop = 0; 
+	rx.next_expected = 0;
+	n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, PRINT_NO_LOSS); 
+	if(n  == 0) {
 	    /* No delay necessary */
 	    return 0; 
 	}
+	if(n == packets) {
+	    printf("No packets received.. aborting\n");
+	    exit(0);
+	}
+	current_sleep = 64; 
 	do { 
 	    tx.sleep_period = current_sleep;
+	    rx.packets = packets;
+	    tx.packets = packets;
+	    tx.next_expected = 0;
+	    rx.oop = 0; 
+	    rx.next_expected = 0;
 	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, QUIET); 
-	    if(n == tx.packets*tx_threads) {
-		printf("No packets received.. aborting\n");
-		exit(0);
-	    }
 	    current_sleep *= 2; /* *= 4? */
 	} while (n != 0); 
 	delta = current_sleep/2;
@@ -668,6 +717,11 @@ int main(int argc, char **argv)
 	do { 
 	    delta /= 2;
 	    tx.sleep_period = current_sleep;
+	    rx.packets = packets;
+	    tx.packets = packets;
+	    tx.next_expected = 0;
+	    rx.oop = 0; 
+	    rx.next_expected = 0;
 	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, delta == 0?PRINT:QUIET); 
 	    if(n == 0) { 
 		/* current_sleep too high! */		
@@ -677,6 +731,11 @@ int main(int argc, char **argv)
 	    }
 	} while(delta);
     } else {
+	rx.packets = packets;
+	tx.packets = packets;
+	tx.next_expected = 0;
+	rx.oop = 0; 
+	rx.next_expected = 0;
 	do_udp_bmark(&tx, &rx, tx_threads, rx_threads, PRINT); 
     }
     return 0;

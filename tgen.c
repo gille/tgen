@@ -271,11 +271,9 @@ static void * rx_thread(void *arg) {
 static void * tx_thread(void *arg) {
     struct state *tx = (struct state*)arg;
     char *p = malloc(tx->size);
-    char *p2;
     int i;
     on_error_ptr(p, "malloc");
-    p2 = prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
-    (void)p2;
+    prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
 
     pthread_barrier_wait(&start_barrier);
     for(i=0; i < tx->packets;i++) {	    

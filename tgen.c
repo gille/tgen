@@ -245,8 +245,8 @@ static void * rx_thread(void *arg) {
     fd_set r; 
     struct timeval t;
     int n;
+    
     packets = 0;
-
     FD_ZERO(&r);
     FD_SET(rx->intf, &r);
 

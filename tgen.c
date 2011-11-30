@@ -22,6 +22,10 @@
 #include <pthread.h>
 
 
+#define QUIET         0
+#define PRINT         1 
+#define PRINT_NO_LOSS 2
+
 #define printv(fmt, args...) do { if(unlikely(verbose)) {printf(fmt, ##args); } } while(0)
 #define printvv(fmt, args...) do { if(unlikely(verbose > 1)) {printf(fmt, ##args); } } while(0)
 #define printvvv(fmt, args...) do { if(unlikely(verbose > 2)) {printf(fmt, ##args); } } while(0)
@@ -272,13 +276,11 @@ static void * tx_thread(void *arg) {
     on_error_ptr(p, "malloc");
     p2 = prepare_tx_udp(tx, p, tx->sender_ip, tx->tx_ip, tx->port, tx->port, tx->size);
     (void)p2;
+
     pthread_barrier_wait(&start_barrier);
-    for(i = 0; i < 4; i++) {	
-	for(i=0; i < tx->packets;i++) {	    
-	    send_pkt(tx, p, tx->size);
-	    usleep(tx->sleep_period);
-	}
-	return 0;
+    for(i=0; i < tx->packets;i++) {	    
+	send_pkt(tx, p, tx->size);
+	usleep(tx->sleep_period);
     }
 
     return NULL;
@@ -288,7 +290,7 @@ static void usage(void) {
     printf("usage: \n");
 }
 
-static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, int rx_packets, int size, int tx_threads) {
+static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, int rx_packets, int size, int print) {
     struct timeval t;
     uint64_t usec;
     uint64_t tx_bw, rx_bw;
@@ -307,26 +309,31 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     tx_bw *= 8;
     rx_bw = tx_bw;
     tx_bw *= tx_packets;
-    tx_bw *= tx_threads;
     rx_bw *= rx_packets;
     rx_bw /= usec;
     tx_bw /= usec;
 
 
-    printv("tx bandwidth: %lldMb/s rx bandwidth %lldMb/s rx packets lost: %d\n", tx_bw, rx_bw, tx_packets*tx_threads-rx_packets);
+    if(print == PRINT || (print == PRINT_NO_LOSS && tx_packets == rx_packets)) {
+	printf("tx bandwidth: %lldMb/s rx bandwidth %lldMb/s rx packets lost: %d\n", tx_bw, rx_bw, tx_packets-rx_packets);
+    } else {
+	printv("tx bandwidth: %lldMb/s rx bandwidth %lldMb/s rx packets lost: %d\n", tx_bw, rx_bw, tx_packets-rx_packets);
+    }
     tx_bw = tx_packets;
-    tx_bw *= tx_threads;
     tx_bw *= 1000000;
     tx_bw /= usec;
 
     rx_bw = rx_packets;
     rx_bw *= 1000000;
     rx_bw /= usec;
-
-    printv("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
+    if(print == PRINT || (print == PRINT_NO_LOSS && tx_packets == rx_packets)) {
+	printf("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
+    } else { 
+	printv("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
+    }
 }
 
-int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads);
+int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print);
 
 
 int main(int argc, char **argv) {
@@ -369,17 +376,14 @@ int main(int argc, char **argv) {
 	case 's':
 	    size = atoi(optarg);
 	    break;
-
 	case 'S':
 	    i = inet_pton(AF_INET, optarg, &my_ip);
 	    on_error(i, "inet_pton");
 	    break;
-
 	case 'T':
 	    i = inet_pton(AF_INET, optarg, &tx_ip);
 	    on_error(i, "inet_pton");
 	    break;
-
 	case 't':
 	    tx_threads = atoi(optarg);
 	    break;
@@ -546,14 +550,14 @@ int main(int argc, char **argv) {
     if(binary_search) {
 	current_sleep = 64; 
 	tx.sleep_period = 0; 
-	if(do_udp_bmark(&tx, &rx, tx_threads, rx_threads) == 0) {
+	if(do_udp_bmark(&tx, &rx, tx_threads, rx_threads, PRINT_NO_LOSS) == 0) {
 	    /* No delay necessary */
 	    return 0; 
 	}
 
 	do { 
 	    tx.sleep_period = current_sleep;
-	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads); 
+	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, QUIET); 
 	    if(n == tx.packets*tx_threads) {
 		printf("No packets received.. aborting\n");
 		exit(0);
@@ -565,7 +569,7 @@ int main(int argc, char **argv) {
 	do { 
 	    delta /= 2;
 	    tx.sleep_period = current_sleep;
-	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads); 
+	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, delta == 0?PRINT:QUIET); 
 	    if(n == 0) { 
 		/* current_sleep too high! */		
 		current_sleep -= delta;
@@ -574,12 +578,12 @@ int main(int argc, char **argv) {
 	    }
 	} while(delta);
     } else {
-	do_udp_bmark(&tx, &rx, tx_threads, rx_threads); 
+	do_udp_bmark(&tx, &rx, tx_threads, rx_threads, PRINT); 
     }
     return 0;
 }
 
-int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads) {
+int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print) {
     int i; 
     int o;
     int cpus = 8; 
@@ -629,9 +633,9 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
 	o = pthread_create(&tx_pthreads[i], &attr, tx_thread, tx_th);
 	on_error_zero(o, "pthread_create");
     }
+    usleep(100);
     gettimeofday(&t0, NULL);
     o = pthread_barrier_wait(&start_barrier);
-    on_error_zero(o, "pthread_barrier_wait");
     for(i=0; i < tx_threads; i++) {
 	o = pthread_join(tx_pthreads[i], NULL);
 	on_error_zero(o, "pthread_join");
@@ -649,7 +653,7 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
     gettimeofday(&t1, NULL);
     free(tx_pthreads);
     free(rx_pthreads);
-    print_time(&t0, &t1, tx->packets, rx_packets, tx->size, tx_threads);
+    print_time(&t0, &t1, tx_threads*tx->packets, rx_packets, tx->size, print);
 
     return tx->packets*tx_threads-rx_packets;
 }

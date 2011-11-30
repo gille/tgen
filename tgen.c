@@ -394,6 +394,7 @@ int main(int argc, char **argv) {
 	    port = atoi(optarg);
 	    break;
 	case 'u':
+	    tx.sleep_period = atoi(optarg);
 	    break;
 	case 'B':
 	    binary_search = 1;
@@ -464,12 +465,14 @@ int main(int argc, char **argv) {
 	   "\tport: %d\n"
 	   "\tpackets %d\n"
 	   "\tsize: %db\n\n"
+	   "\ttxlseep: %dus\n"
+	   "\tbinary search %s\n"
 	   ,
 	   rx_threads, tx_threads, intf0,
 	   htonl(rx_ip)>>24, (htonl(rx_ip)>>16)&0xFF, (htonl(rx_ip)>>8)&0xFF, htonl(rx_ip)&0xFF,
 	   htonl(tx_ip)>>24, (htonl(tx_ip)>>16)&0xFF, (htonl(tx_ip)>>8)&0xFF, htonl(tx_ip)&0xFF,
 	   htonl(my_ip)>>24, (htonl(my_ip)>>16)&0xFF, (htonl(my_ip)>>8)&0xFF, htonl(my_ip)&0xFF,
-	   port, packets, size
+	   port, packets, size, tx.sleep_period, binary_search?"on":"off"
 	   );
     printvv("size: "
 	    "\t14b\tethernet\n"
@@ -485,6 +488,7 @@ int main(int argc, char **argv) {
 
     memset(&ifr, 0, sizeof(ifr));
     strcpy(ifr.ifr_name, intf0); 
+
     o = ioctl(i, SIOCGIFHWADDR, &ifr);
     on_error(o, "SIOCGIFHWADDR"); 
     memcpy(tx.me, ifr.ifr_hwaddr.sa_data, 6);
@@ -500,7 +504,6 @@ int main(int argc, char **argv) {
 	       size, ifr.ifr_mtu);
 	exit(1);
     }
-
 
     close(i);
 
@@ -519,7 +522,6 @@ int main(int argc, char **argv) {
     tx.tx_ip = rx_ip;
     tx.sender_ip = my_ip;
     tx.packets = packets;
-    tx.sleep_period = 0;
     tx.size = size;
 
     rx.intf = socket(PF_INET, SOCK_DGRAM, 0);

@@ -291,7 +291,9 @@ static void usage(void) {
     printf("tgen\n"
 	   "\t-B find maximum bandwidth with a binary search method\n"
 	   "\t-i output device\n"
+	   "\t-r number of rx threads to use (default 1)\n"
 	   "\t-R IP address to send traffic to\n"
+	   "\t-t number of tx threads to use (default 1)\n"
 	   "\t-T IP address to send traffic via\n"
 	   "\t-S IP address to source traffic from\n"
 	   "\t-p port number to use\n"
@@ -355,17 +357,13 @@ int main(int argc, char **argv) {
     struct sockaddr_ll tx_sll;
     struct sockaddr_in rx_sin;
     const char optstr[]="Bi:hn:o:p:r:R:s:S:t:T:u:v";
-
     int i, o, ifindex, n;
-
     int binary_search = 0;
     struct ifreq ifr;
-
     int tx_threads = 1, rx_threads = 1, packets = 0, size = 0, die = 0;
     uint32_t rx_ip = 0, tx_ip = 0, my_ip = 0;
     char *intf0 = NULL;
     unsigned short port = 0;
-
     int current_sleep, delta; 
 
     while((o=getopt(argc, argv, optstr)) != -1) {

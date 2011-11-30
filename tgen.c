@@ -68,6 +68,7 @@ struct state {
 	struct sockaddr *saddr; 
 	struct sockaddr_in *sin;
     } ;
+
     uint32_t tx_ip;
     uint32_t sender_ip;
     unsigned short port;
@@ -79,6 +80,8 @@ static int verbose=0;
 static int id = 0;
 static const unsigned char eth_broadcast[]={0xff,0xff,0xff,0xff,0xff,0xff};
 static pthread_barrier_t start_barrier;
+static pthread_mutex_t tx_mutex;
+static pthread_cond_t cond; 
 
 static void * fill_ethernet(unsigned char *p, const unsigned char *him, const unsigned char *me, 
 			    uint16_t proto) 
@@ -107,16 +110,14 @@ static unsigned short csum(unsigned short *buf, int nwords)
         return (unsigned short)(~sum);
 }
 
-static void do_arp(struct state *tx, uint32_t src, uint32_t dst) {
-    //, unsigned char *my_eth, char *my_ip) {
+static void do_arp(struct state *tx, uint32_t src, uint32_t dst) 
+{
     int n;
     int i;
     struct arphdr *arp;
-    int size;
-
-    unsigned char buf[128];
+    unsigned char buf[64];
     unsigned char *p;
-    /* I want to send real RAW packets */
+
     p = fill_ethernet(buf, eth_broadcast, tx->me, (0x806));
     arp = (struct arphdr*)p;
     arp->ar_hrd=htons(1);
@@ -135,15 +136,15 @@ static void do_arp(struct state *tx, uint32_t src, uint32_t dst) {
     i+=6;
     *(uint32_t*)&p[i] = *(uint32_t*)&dst; 
     i+=4;
-    size = &p[i]-&buf[0];
-    n = sendto(tx->intf, buf, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
+    n = sendto(tx->intf, buf, &p[i]-&buf[0], 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
     on_error(n, "sendto");
 }
 
-static int recv_arp(struct state *rx, uint32_t src, uint32_t dst) {
+static int recv_arp(struct state *rx, uint32_t src, uint32_t dst) 
+{
     struct arphdr *arp;
     struct ethhdr *eth;
-    char buf[128];
+    char buf[64];
     char *p;
     socklen_t sll;
     uint32_t a,b;
@@ -165,12 +166,12 @@ static int recv_arp(struct state *rx, uint32_t src, uint32_t dst) {
 	    return 1;
 	}
     }
-
-    
+   
     return 0;
 }
 
-static void * fill_ip(void *p, uint32_t me, uint32_t him, uint16_t proto, int size) {
+static void * fill_ip(void *p, uint32_t me, uint32_t him, uint16_t proto, int size) 
+{
     struct iphdr *ip = p;
     ip->ihl=5;
     ip->version=4;
@@ -188,7 +189,8 @@ static void * fill_ip(void *p, uint32_t me, uint32_t him, uint16_t proto, int si
     return ++ip;
 }
 
-static void * fill_udp(void *p, uint16_t src, uint16_t dst, uint16_t size) {
+static void * fill_udp(void *p, uint16_t src, uint16_t dst, uint16_t size) 
+{
     struct udphdr *udp = p;
     udp->source = htons(src);
     udp->dest = htons(dst);
@@ -213,32 +215,34 @@ static void do_tx_udp(struct state *tx, uint32_t src, uint32_t dst, uint16_t spr
 }
 #endif
 
-static void *prepare_tx_udp(struct state *tx, void *p, uint32_t src_ip, uint32_t dst_ip, uint16_t sprt, uint16_t dprt, uint16_t size) {
+static void *prepare_tx_udp(struct state *tx, void *p, uint32_t src_ip, uint32_t dst_ip, uint16_t sprt, uint16_t dprt, uint16_t size) 
+{
     p = fill_ethernet(p, tx->mac, tx->me, 0x0800);
     p = fill_ip(p, src_ip, dst_ip, IPPROTO_UDP, (size-SIZEOF_ETHERNET));
     p = fill_udp(p, sprt, dprt, size-SIZEOF_ETHERNET-SIZEOF_IP);
     return p;
 }
 
-static void send_pkt(struct state *tx, void *p, int size) {
+static void send_pkt(struct state *tx, void *p, int size) 
+{
     int n;
     int restart;
 
     do { 
 	restart = 0;
 	n = sendto(tx->intf, p, size, 0, (struct sockaddr*)tx->sll, sizeof(*(tx->sll)));
-	if(n == -1 && errno == ENOBUFS) { 
+	if(unlikely(n == -1 && errno == ENOBUFS)) { 
 	    restart = 1;
 	} else {
 	    on_error(n, "sendto");
-	}
-	
-    } while((restart == 1)); 
+	}	
+    } while(unlikely(restart == 1)); 
 
     on_error(n, "sendto");
 }
 
-static void * rx_thread(void *arg) {
+static void * rx_thread(void *arg) 
+{
     char buf[65535];
     int packets;
     struct state *rx = arg;
@@ -268,7 +272,8 @@ static void * rx_thread(void *arg) {
     return NULL;
 }
 
-static void * tx_thread(void *arg) {
+static void * tx_thread(void *arg) 
+{
     struct state *tx = (struct state*)arg;
     char *p = malloc(tx->size);
     int i;
@@ -284,9 +289,10 @@ static void * tx_thread(void *arg) {
     return NULL;
 }
 
-static void usage(void) {
-    printf("usage: \n");
-    printf("tgen\n"
+static void usage(void) 
+{
+    printf("usage: \n"
+	   "tgen\n"
 	   "\t-B find maximum bandwidth with a binary search method\n"
 	   "\t-i output device\n"
 	   "\t-r number of rx threads to use (default 1)\n"
@@ -295,18 +301,19 @@ static void usage(void) {
 	   "\t-T IP address to send traffic via\n"
 	   "\t-S IP address to source traffic from\n"
 	   "\t-p port number to use\n"
-	   "\t-n number of packets to send\n"
+	   "\t-n number of packets to send per thread\n"
 	   "\t-s size of packet incl. all headers\n"
 	   "\t-v verbosity -vvv for max\n"
 	   "\t-u time to sleep between each packet\n"
 	   "\t\n");
 }
 
-static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, int rx_packets, int size, int print) {
+static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, int rx_packets, int size, int print) 
+{
     struct timeval t;
     uint64_t usec;
     uint64_t tx_bw, rx_bw;
-
+    
     if(t1->tv_usec < t0->tv_usec) {
 	t1->tv_usec += 1000000;
 	t1->tv_sec--;
@@ -324,7 +331,6 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     rx_bw *= rx_packets;
     rx_bw /= usec;
     tx_bw /= usec;
-
 
     if(print == PRINT || (print == PRINT_NO_LOSS && tx_packets == rx_packets)) {
 	printf("tx bandwidth: %lldMb/s rx bandwidth %lldMb/s rx packets lost: %d\n", tx_bw, rx_bw, tx_packets-rx_packets);
@@ -346,10 +352,82 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     }
 }
 
-int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print);
+int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print) {
+    int i; 
+    int o;
+    int cpus = 8; 
+    pthread_attr_t attr;
+    struct timeval t0, t1;
+    struct state *tx_th;
+    pthread_t *tx_pthreads;
+    pthread_t *rx_pthreads;
+    cpu_set_t cpu;
+    int rx_packets = 0; 
 
+    tx_pthreads = malloc(sizeof(pthread_t)*tx_threads);
+    on_error_ptr(tx_pthreads, "malloc");
 
-int main(int argc, char **argv) {
+    rx_pthreads = malloc(sizeof(pthread_t)*rx_threads);
+    on_error_ptr(rx_pthreads, "malloc");
+
+    i = pthread_barrier_init(&start_barrier, NULL, tx_threads+1);
+    on_error_zero(i, "pthread_barrier_init");
+
+    for(i=0; i < rx_threads; i++) {
+	CPU_ZERO(&cpu);
+	CPU_SET((i+cpus/2)%cpus, &cpu);
+	o = pthread_attr_init(&attr);
+	on_error_zero(o, "pthread_attr_init");
+	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
+	on_error_zero(o, "pthread_attr_setaffinity_np");
+	printvvv("Spawning rx thread %d on processor %d\n", 
+		 i, (i+cpus/2)%cpus);
+	o = pthread_create(&rx_pthreads[i], &attr, rx_thread, rx);
+	on_error_zero(o, "pthread_create");
+    }
+
+    for (i=0; i < tx_threads; i++) { 
+	CPU_ZERO(&cpu);
+	CPU_SET(i%cpus, &cpu);
+	o = pthread_attr_init(&attr);
+	on_error_zero(o, "pthread_attr_init");
+	tx_th = malloc(sizeof(*tx_th));
+	on_error_ptr(tx_th, "malloc");
+	memcpy(tx_th, tx, sizeof(*tx_th));
+	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
+	on_error_zero(o, "pthread_attr_setaffinity_np");
+	printvvv("Spawning tx thread %d on processor %d\n", 
+		 i, i%cpus);
+	o = pthread_create(&tx_pthreads[i], &attr, tx_thread, tx_th);
+	on_error_zero(o, "pthread_create");
+    }
+    usleep(50000);
+    o = pthread_barrier_wait(&start_barrier);
+    gettimeofday(&t0, NULL);
+    for(i=0; i < tx_threads; i++) {
+	o = pthread_join(tx_pthreads[i], NULL);
+	on_error_zero(o, "pthread_join");
+	printvv("tx thread %d died\n", i);
+    }
+
+    for(i=0; i < rx_threads; i++) {
+	unsigned int *p;
+	o = pthread_join(rx_pthreads[i], (void**)&p);
+	on_error_zero(o, "pthread_join");
+	printvv("rx thread %d died\n", i);
+	rx_packets += (unsigned int)p;
+    }    
+
+    gettimeofday(&t1, NULL);
+    free(tx_pthreads);
+    free(rx_pthreads);
+    print_time(&t0, &t1, tx_threads*tx->packets, rx_packets, tx->size, print);
+
+    return tx->packets*tx_threads-rx_packets;
+}
+
+int main(int argc, char **argv) 
+{
     struct state tx; 
     struct state rx; 
     struct sockaddr_ll tx_sll;
@@ -604,77 +682,3 @@ int main(int argc, char **argv) {
     return 0;
 }
 
-int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_threads, int print) {
-    int i; 
-    int o;
-    int cpus = 8; 
-    pthread_attr_t attr;
-    struct timeval t0, t1;
-    struct state *tx_th;
-    pthread_t *tx_pthreads;
-    pthread_t *rx_pthreads;
-    cpu_set_t cpu;
-    int rx_packets = 0; 
-
-    tx_pthreads = malloc(sizeof(pthread_t)*tx_threads);
-    on_error_ptr(tx_pthreads, "malloc");
-
-    rx_pthreads = malloc(sizeof(pthread_t)*rx_threads);
-    on_error_ptr(rx_pthreads, "malloc");
-
-    i = pthread_barrier_init(&start_barrier, NULL, tx_threads+1);
-    on_error_zero(i, "pthread_barrier_init");
-
-    for(i=0; i < rx_threads; i++) {
-	CPU_ZERO(&cpu);
-	CPU_SET((i+cpus/2)%cpus, &cpu);
-	o = pthread_attr_init(&attr);
-	on_error_zero(o, "pthread_attr_init");
-	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
-	on_error_zero(o, "pthread_attr_setaffinity_np");
-	printvvv("Spawning rx thread %d on processor %d\n", 
-	       i, (i+cpus/2)%cpus);
-	o = pthread_create(&rx_pthreads[i], &attr, rx_thread, rx);
-	on_error_zero(o, "pthread_create");
-    }
-
-    for (i=0; i < tx_threads; i++) { 
-	CPU_ZERO(&cpu);
-	CPU_SET(i%cpus, &cpu);
-	o = pthread_attr_init(&attr);
-	on_error_zero(o, "pthread_attr_init");
-	tx_th = malloc(sizeof(*tx_th));
-	on_error_ptr(tx_th, "malloc");
-	memcpy(tx_th, tx, sizeof(*tx_th));
-	tx_th->intf = socket(PF_PACKET, SOCK_RAW, htons(0x806));
-	o = pthread_attr_setaffinity_np(&attr, cpus, &cpu); 
-	on_error_zero(o, "pthread_attr_setaffinity_np");
-	printvvv("Spawning tx thread %d on processor %d\n", 
-	       i, i%cpus);
-	o = pthread_create(&tx_pthreads[i], &attr, tx_thread, tx_th);
-	on_error_zero(o, "pthread_create");
-    }
-    usleep(100);
-    gettimeofday(&t0, NULL);
-    o = pthread_barrier_wait(&start_barrier);
-    for(i=0; i < tx_threads; i++) {
-	o = pthread_join(tx_pthreads[i], NULL);
-	on_error_zero(o, "pthread_join");
-	printvv("tx thread %d died\n", i);
-    }
-
-    for(i=0; i < rx_threads; i++) {
-	unsigned int *p;
-	o = pthread_join(rx_pthreads[i], (void**)&p);
-	on_error_zero(o, "pthread_join");
-	printvv("rx thread %d died\n", i);
-	rx_packets += (unsigned int)p;
-    }    
-
-    gettimeofday(&t1, NULL);
-    free(tx_pthreads);
-    free(rx_pthreads);
-    print_time(&t0, &t1, tx_threads*tx->packets, rx_packets, tx->size, print);
-
-    return tx->packets*tx_threads-rx_packets;
-}

@@ -288,6 +288,18 @@ static void * tx_thread(void *arg) {
 
 static void usage(void) {
     printf("usage: \n");
+    printf("tgen\n"
+	   "\t-B find maximum bandwidth with a binary search method\n"
+	   "\t-i output device\n"
+	   "\t-R IP address to send traffic to\n"
+	   "\t-T IP address to send traffic via\n"
+	   "\t-S IP address to source traffic from\n"
+	   "\t-p port number to use\n"
+	   "\t-n number of packets to send\n"
+	   "\t-s size of packet incl. all headers\n"
+	   "\t-v verbosity -vvv for max\n"
+	   "\t-u time to sleep between each packet\n"
+	   "\t\n");
 }
 
 static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, int rx_packets, int size, int print) {
@@ -326,6 +338,7 @@ static void print_time(struct timeval *t0, struct timeval *t1, int tx_packets, i
     rx_bw = rx_packets;
     rx_bw *= 1000000;
     rx_bw /= usec;
+
     if(print == PRINT || (print == PRINT_NO_LOSS && tx_packets == rx_packets)) {
 	printf("tx %lld pps rx %lld pps\n", tx_bw, rx_bw);
     } else { 
@@ -338,11 +351,10 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
 
 int main(int argc, char **argv) {
     struct state tx; 
-
     struct state rx; 
     struct sockaddr_ll tx_sll;
     struct sockaddr_in rx_sin;
-    const char optstr[]="p:o:r:R:t:T:i:S:vn:s:u:B";
+    const char optstr[]="Bi:hn:o:p:r:R:s:S:t:T:u:v";
 
     int i, o, ifindex, n;
 
@@ -358,6 +370,10 @@ int main(int argc, char **argv) {
 
     while((o=getopt(argc, argv, optstr)) != -1) {
 	switch(o) {
+	case 'B':
+	    binary_search = 1;
+	    /* Binary search for max bandwidth */
+	    break;
 	case 'i':
 	    intf0 = optarg;
 	    break;
@@ -366,12 +382,20 @@ int main(int argc, char **argv) {
 	    break;
 	case 'o':
 	    break;
+	case 'p':
+	    port = atoi(optarg);
+	    break;
 	case 'r':
 	    rx_threads = atoi(optarg);
 	    break;
 	case 'R':
 	    i = inet_pton(AF_INET, optarg, &rx_ip);
 	    on_error(i, "inet_pton");
+	    if(rx_ip == 0) {
+		printf("Not a valid rx IP address\n");
+		return -1;
+	    }
+
 	    break;
 	case 's':
 	    size = atoi(optarg);
@@ -379,26 +403,28 @@ int main(int argc, char **argv) {
 	case 'S':
 	    i = inet_pton(AF_INET, optarg, &my_ip);
 	    on_error(i, "inet_pton");
-	    break;
-	case 'T':
-	    i = inet_pton(AF_INET, optarg, &tx_ip);
-	    on_error(i, "inet_pton");
+	    if(my_ip == 0) {
+		printf("Not a valid source IP address\n");
+		return -1;
+	    }
 	    break;
 	case 't':
 	    tx_threads = atoi(optarg);
 	    break;
-	case 'v':
-	    verbose++;
-	    break;
-	case 'p':
-	    port = atoi(optarg);
+	case 'T':
+	    i = inet_pton(AF_INET, optarg, &tx_ip);
+	    on_error(i, "inet_pton");
+	    if(tx_ip == 0) {
+		printf("Not a valid target IP address\n");
+		return -1;
+	    }
+
 	    break;
 	case 'u':
 	    tx.sleep_period = atoi(optarg);
 	    break;
-	case 'B':
-	    binary_search = 1;
-	    /* Binary search for max bandwidth */
+	case 'v':
+	    verbose++;
 	    break;
 	case 'h':
 	default:
@@ -456,24 +482,25 @@ int main(int argc, char **argv) {
 	exit(die);
 
     printv("Configuration: \n"
-	   "\trx_threads: %d\n"
-	   "\ttx_threads: %d\n"
-	   "\ttx_interface: %s\n"
-	   "\trx_ip: %d.%d.%d.%d\n"
-	   "\ttx_ip: %d.%d.%d.%d\n"
-	   "\tmy_ip: %d.%d.%d.%d\n"
-	   "\tport: %d\n"
-	   "\tpackets %d\n"
-	   "\tsize: %db\n\n"
-	   "\ttxlseep: %dus\n"
-	   "\tbinary search %s\n"
-	   ,
+	   "\trx_threads:\t%d\n"
+	   "\ttx_threads:\t%d\n"
+	   "\ttx_interface:\t%s\n"
+	   "\trx_ip:\t\t%d.%d.%d.%d\n"
+	   "\ttx_ip:\t\t%d.%d.%d.%d\n"
+	   "\tmy_ip:\t\t%d.%d.%d.%d\n"
+	   "\tport:\t\t%d\n"
+	   "\tpackets:\t%d\n"
+	   "\tsize:\t\t%db\n"
+	   "\ttx sleep:\t%dus\n"
+	   "\tbinary search\t%s\n"
+	   "\n",
 	   rx_threads, tx_threads, intf0,
 	   htonl(rx_ip)>>24, (htonl(rx_ip)>>16)&0xFF, (htonl(rx_ip)>>8)&0xFF, htonl(rx_ip)&0xFF,
 	   htonl(tx_ip)>>24, (htonl(tx_ip)>>16)&0xFF, (htonl(tx_ip)>>8)&0xFF, htonl(tx_ip)&0xFF,
 	   htonl(my_ip)>>24, (htonl(my_ip)>>16)&0xFF, (htonl(my_ip)>>8)&0xFF, htonl(my_ip)&0xFF,
 	   port, packets, size, tx.sleep_period, binary_search?"on":"off"
 	   );
+
     printvv("size: "
 	    "\t14b\tethernet\n"
 	    "\t20b\tIP\n"
@@ -548,7 +575,6 @@ int main(int argc, char **argv) {
     printv("got arp response from %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
 	    tx.mac[0], tx.mac[1], tx.mac[2], tx.mac[3], tx.mac[4], tx.mac[5]);
    
-
     if(binary_search) {
 	current_sleep = 64; 
 	tx.sleep_period = 0; 
@@ -556,7 +582,6 @@ int main(int argc, char **argv) {
 	    /* No delay necessary */
 	    return 0; 
 	}
-
 	do { 
 	    tx.sleep_period = current_sleep;
 	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, QUIET); 

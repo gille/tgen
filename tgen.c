@@ -395,7 +395,6 @@ int main(int argc, char **argv) {
 		printf("Not a valid rx IP address\n");
 		return -1;
 	    }
-
 	    break;
 	case 's':
 	    size = atoi(optarg);
@@ -418,7 +417,6 @@ int main(int argc, char **argv) {
 		printf("Not a valid target IP address\n");
 		return -1;
 	    }
-
 	    break;
 	case 'u':
 	    tx.sleep_period = atoi(optarg);

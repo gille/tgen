@@ -1,3 +1,19 @@
+/* 
+ * TGEN is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ * 
+ * TGEN is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with Wget; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.   
+ */
+
 #include <stdint.h>
 #include <sys/socket.h>
 #include <stdio.h>
@@ -462,6 +478,7 @@ int do_udp_bmark(struct state * tx, struct state * rx, int tx_threads, int rx_th
     return tx_packets-rx_packets;
 }
 
+/* This totally needs an ICMP flood mode too and an adaptive mode */
 int main(int argc, char **argv) 
 {
     struct state tx; 
@@ -723,6 +740,10 @@ int main(int argc, char **argv)
 	    rx.oop = 0; 
 	    rx.next_expected = 0;
 	    n = do_udp_bmark(&tx, &rx, tx_threads, rx_threads, delta == 0?PRINT:QUIET); 
+
+	    if(delta == 0) 
+		break;
+	    
 	    if(n == 0) { 
 		/* current_sleep too high! */		
 		current_sleep -= delta;

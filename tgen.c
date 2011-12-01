@@ -78,6 +78,7 @@ struct state {
     int packets; 
     int size;
     int sleep_period;
+    int adaptive;
 
     union {
 	struct sockaddr_ll *sll;
@@ -97,6 +98,8 @@ static int id = 0;
 static const unsigned char eth_broadcast[]={0xff,0xff,0xff,0xff,0xff,0xff};
 static pthread_barrier_t start_barrier;
 static pthread_spinlock_t tx_spin, rx_spin; 
+
+static volatile int tx_packets = 32; 
 
 static void * fill_ethernet(unsigned char *p, const unsigned char *him, const unsigned char *me, 
 			    uint16_t proto) 
@@ -157,31 +160,43 @@ static void do_arp(struct state *tx, uint32_t src, uint32_t dst)
 
 static int recv_arp(struct state *rx, uint32_t src, uint32_t dst) 
 {
-    struct arphdr *arp;
-    struct ethhdr *eth;
     char buf[64];
-    char *p;
     socklen_t sll;
     uint32_t a,b;
-    int n;
+    int i, n;
+    fd_set r; 
+    struct timeval t = {3, 0};
 
-    sll = sizeof(*rx->sll);
-    n = recvfrom(rx->intf, buf, sizeof(buf), 0, (struct sockaddr*)rx->sll, &sll); 
-    on_error(n,"recvfrom");
-    eth = (struct ethhdr*)buf; 
-
-    arp = (struct arphdr*)++eth;
-    if(likely(arp->ar_op == htons(ARPOP_REPLY))) {
-	arp++;
-	p = (char*)arp;
-	*(unsigned int*)&a=*(unsigned int*)&p[6];
-	*(unsigned int*)&b=*(unsigned int*)&p[16];
-	if(src ==  b && dst == a) {
-	    memcpy(rx->mac, p, 6);
-	    return 1;
+    FD_ZERO(&r); 
+    FD_SET(rx->intf, &r);
+    
+    for(i=0; i < 5; i++) {
+	n = select(rx->intf+1, &r, NULL, NULL, &t);
+	if(n == 1) { 
+	    struct ethhdr *eth;
+	    struct arphdr *arp;
+	    sll = sizeof(*rx->sll);
+	    n = recvfrom(rx->intf, buf, sizeof(buf), 0, (struct sockaddr*)rx->sll, &sll); 
+	    on_error(n,"recvfrom");
+	    eth = (struct ethhdr*)buf; 
+	    
+	    arp = (struct arphdr*)++eth;
+	    if(likely(arp->ar_op == htons(ARPOP_REPLY))) {
+		char *p;
+		arp++;
+		p = (char*)arp;
+		*(unsigned int*)&a=*(unsigned int*)&p[6];
+		*(unsigned int*)&b=*(unsigned int*)&p[16];
+		if(src ==  b && dst == a) {
+		    memcpy(rx->mac, p, 6);
+		    return 1;
+		}
+	    }
+	} else {
+	    /* timeout! */
+	    return 0;
 	}
     }
-   
     return 0;
 }
 
@@ -288,6 +303,8 @@ static void * rx_thread(void *arg)
 	    packets++;
 	    rx->packets--;
 	    i = *(unsigned int*)buf;
+	    if(rx->adaptive) 
+		__sync_fetch_and_add(&tx_packets, 1); 
 	    if(i != rx->next_expected) {
 		rx->oop++; 
 	    } else {
@@ -325,6 +342,10 @@ static void * tx_thread(void *arg)
 	}
 	tx->packets--;
 	*p2 = tx->next_expected++;
+	if(tx->adaptive) {
+	    __sync_fetch_and_sub(&tx_packets, 1); 		    
+	    while(tx_packets == 0);
+	}
 	send_pkt(tx, p, tx->size);
 	pthread_spin_unlock(&tx_spin);
 	usleep(tx->sleep_period);
@@ -337,6 +358,7 @@ static void usage(void)
 {
     printf("usage: \n"
 	   "tgen\n"
+	   "\t-A send a new packet after on arrives, prereload with argument packets\n"
 	   "\t-B find maximum bandwidth with a binary search method\n"
 	   "\t-i output device\n"
 	   "\t-r number of rx threads to use (default 1)\n"
@@ -485,9 +507,9 @@ int main(int argc, char **argv)
     struct state rx; 
     struct sockaddr_ll tx_sll;
     struct sockaddr_in rx_sin;
-    const char optstr[]="Bi:hn:o:p:r:R:s:S:t:T:u:v";
+    const char optstr[]="A:Bi:hn:o:p:r:R:s:S:t:T:u:v";
     int i, o, ifindex, n;
-    int binary_search = 0;
+    int binary_search = 0, adaptive = 0;
     struct ifreq ifr;
     int tx_threads = 1, rx_threads = 1, packets = 0, size = 0, die = 0;
     uint32_t rx_ip = 0, tx_ip = 0, my_ip = 0;
@@ -500,6 +522,9 @@ int main(int argc, char **argv)
 
     while((o=getopt(argc, argv, optstr)) != -1) {
 	switch(o) {
+	case 'A':
+	    adaptive = atoi(optarg);
+	    break;
 	case 'B':
 	    binary_search = 1;
 	    /* Binary search for max bandwidth */
@@ -606,6 +631,15 @@ int main(int argc, char **argv)
 	die = 1;
     }
 
+    if(adaptive && binary_search) {
+	printf("Error -B and -A are exclusive\n");
+	die = 1;
+    }
+
+    if(adaptive < 0) {
+	printf("Adaptive with negative packets doesn't work\n");
+	die = 1;
+    }
     if(die)
 	exit(die);
 
@@ -752,6 +786,10 @@ int main(int argc, char **argv)
 	    }
 	} while(delta);
     } else {
+	if(adaptive) {
+	    rx.adaptive = adaptive;
+	    tx.adaptive = adaptive;
+	}
 	rx.packets = packets;
 	tx.packets = packets;
 	tx.next_expected = 0;
